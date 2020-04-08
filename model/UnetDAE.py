@@ -5,12 +5,13 @@ write by qianqianjun
 DenseNet 架构的DAE造成了信息损失过大，重建效果不好
 参考图像分割领域的 Unet 结构，重现编写
 """
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from model.DenseNet import DenseBlock, DenseTransitionBlock
 from setting.parameter import Parameter
-from tools.utils import Mixer, Warper, GridSpatialIntegral
 
 
 ##########################   编码器体系结构  ################################
@@ -22,10 +23,11 @@ class Encoders(nn.Module):
         """
         super(Encoders, self).__init__()
         self.encoder=DenseEncoder(parm, channel=parm.channel, ndf=parm.ndf, ndim=parm.zdim,
-                                  texture_gate_channels=[4, 16, 32, 64],
-                                  warp_gate_channels=[4,16,32,64])
-        self.zImixer=Mixer(parm, in_channel=parm.zdim, out_channel=parm.idim)
-        self.zWmixer=Mixer(parm, in_channel=parm.zdim, out_channel=parm.wdim)
+                                  texture_gate_channels=parm.texture_gate_channels,
+                                  warp_gate_channels=parm.warp_gate_channels)
+
+        self.zImixer=Mixer(in_channel=parm.zdim, out_channel=parm.idim)
+        self.zWmixer=Mixer(in_channel=parm.zdim, out_channel=parm.wdim)
 
     def forward(self,x:torch.Tensor):
         """
@@ -80,7 +82,7 @@ class DenseEncoder(nn.Module):
                     DenseBlock(in_channels=block_in_channels[i-1],
                                layer_number=layers_number[i-1],
                                growth_rate=growth_rate,
-                               use_bottleneck=True,
+                               use_bottleneck=False,
                                norm_method=norm_method),
 
                     DenseTransitionBlock(
@@ -108,7 +110,7 @@ class DenseEncoder(nn.Module):
             )
         )
 
-        # 纹理解码器 unet
+        # 纹理 跳过连接
         self.textureGate=nn.Sequential()
         for i in range(len(texture_gate_channels)):
             self.textureGate.add_module(
@@ -131,7 +133,7 @@ class DenseEncoder(nn.Module):
                 )
             )
 
-        # 变形解码器unet
+        # 变形 跳过连接
         self.warpGate=nn.Sequential()
         for i in range(len(warp_gate_channels)):
             self.warpGate.add_module(
@@ -171,7 +173,8 @@ class DenseEncoder(nn.Module):
         warp_unet_out.append(self.warpGate[2](block2out))
         warp_unet_out.append(self.warpGate[3](block3out))
 
-        out=out.view(-1,self.ndim)
+        # 这里改变一下
+        # out=out.view(-1,self.ndim)
         return out, texture_unet_out,warp_unet_out
 
 #########################   解码器体系结构   #################################
@@ -186,11 +189,11 @@ class Decoders(nn.Module):
         self.idim=parm.idim
         self.wdim=parm.wdim
 
-        self.decoderI=DenseDecoder(parm,ndim=parm.idim,nc=parm.channel,ngf=parm.ngf,
-                                   gate_add_channels=[64,32,16,4])
+        self.decoderT=DenseDecoder(parm, ndim=parm.idim, nc=parm.channel, ngf=parm.ngf,
+                                   gate_add_channels=list(reversed(parm.texture_gate_channels)))
         self.decoderW=DenseDecoder(parm,ndim=parm.wdim,nc=2,ngf=parm.ngf,
                                    activation=nn.Tanh,args=[],f_activation=nn.Sigmoid,f_args=[],
-                                   gate_add_channels=[64,32,16,4])
+                                   gate_add_channels=list(reversed(parm.warp_gate_channels)))
 
         self.warper=Warper(parm)
         self.integrator=GridSpatialIntegral(parm)
@@ -207,8 +210,8 @@ class Decoders(nn.Module):
         :param basegrid:  基准变形场 向量表征
         :return:
         """
-        self.texture=self.decoderI(zI.view(-1,self.idim,1,1), texture_inter_outs)
-        self.diffentialWarping= self.decoderW(zW.view(-1,self.wdim,1,1), warp_inter_outs) * (5.0 / self.imageDimension)
+        self.texture=self.decoderT(zI, texture_inter_outs)
+        self.diffentialWarping= self.decoderW(zW, warp_inter_outs) * (5.0 / self.imageDimension)
         self.warping=self.integrator(self.diffentialWarping)-1.2
         self.warping=self.cutter(self.warping)
         self.resWarping=self.warping-basegrid
@@ -263,7 +266,7 @@ class DenseDecoder(nn.Module):
                         in_channels=block_in_channels[i-1] + gate_add_channels[i-1],
                         layer_number=layers_number[i-1],
                         growth_rate=growth_rate,
-                        use_bottleneck=True
+                        use_bottleneck=False
                     ),
                     DenseTransitionBlock(
                         in_channels=transition_in_channels[i-1],
@@ -310,3 +313,80 @@ class DenseDecoder(nn.Module):
         # 后续层
         out=self.net[5](block4_output)
         return out
+
+#########################  变换层  #########################################
+class Mixer(nn.Module):
+    def __init__(self,in_channel:int,out_channel:int,norm_method=nn.InstanceNorm2d,activation=nn.ReLU):
+        """
+        :param in_channel:  输入通道数目
+        :param out_channel:  输出通道数目
+        """
+        super(Mixer, self).__init__()
+        self.net=nn.Sequential(
+            norm_method(in_channel),
+            nn.Conv2d(in_channels=in_channel,out_channels=out_channel,kernel_size=1,stride=1,padding=0),
+            activation(),
+            norm_method(out_channel),
+            nn.Conv2d(out_channel,out_channel,1,1,0),
+            activation()
+        )
+
+    def forward(self,x:torch.Tensor):
+        """
+        :param x:
+        :return:
+        """
+        out=self.net(x)
+        return out
+
+class Warper(nn.Module):
+    def __init__(self,parm:Parameter):
+        """
+        将纹理图像进行空间变形
+        :param parm:  超参数集合
+        """
+        super(Warper, self).__init__()
+        self.parm=parm
+        self.batchSize=parm.batchSize
+        self.imgSize=parm.imgSize
+
+    def forward(self,image_tensor:torch.Tensor,input_grid:torch.Tensor):
+        """
+        :param image_tensor: 输入图片的 tensor
+        :param input_grid:  变形场
+        :return:  经过变形场变换的最终图像
+        """
+        self.warp=input_grid.permute(0,2,3,1)
+        # 不清楚 align_corners 干什么用的， 但是不加上这个参数会有 warning
+        self.output=F.grid_sample(image_tensor,self.warp,align_corners=True)
+        # torch.nn.functional.grid_sample()
+
+        return self.output
+
+class GridSpatialIntegral(nn.Module):
+    def __init__(self,parm:Parameter):
+        """
+        变形场空间积分运算
+        :param parm: 超参数集合
+        """
+        super(GridSpatialIntegral, self).__init__()
+        self.parm=parm
+        self.w=parm.imgSize
+
+        self.filterx=torch.tensor(np.ones(shape=(1,1,1,self.w)),dtype=torch.float32,requires_grad=False)
+        self.filtery=torch.tensor(np.ones(shape=(1,1,self.w,1)),dtype=torch.float32,requires_grad=False)
+
+        if parm.useCuda:
+            self.filterx=self.filterx.cuda()
+            self.filtery=self.filtery.cuda()
+
+    def forward(self, input_diffgrid:torch.Tensor):
+        """
+        :param input_diffgrid: 差分变形场 tensor
+        :return:
+        """
+        x=F.conv_transpose2d(input=input_diffgrid[:,0,:,:].unsqueeze(1),weight=self.filterx,stride=1,padding=0)
+        y=F.conv_transpose2d(input=input_diffgrid[:,1,:,:].unsqueeze(1),weight=self.filtery,stride=1,padding=0)
+        output_grid=torch.cat((x[:,:,0:self.w,0:self.w],y[:,:,0:self.w,0:self.w]),1)
+
+        return output_grid

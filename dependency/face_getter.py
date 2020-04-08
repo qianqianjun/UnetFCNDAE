@@ -3,7 +3,7 @@ import os
 import cv2
 import dlib
 
-path="/home/qianqianjun/桌面/农村"
+path="/home/qianqianjun/桌面/马云"
 detector=dlib.get_frontal_face_detector()
 
 files=os.listdir(path)
@@ -13,7 +13,7 @@ for file in files:
         images.append(os.path.join(path,file))
 
 name=0
-save_path="/home/qianqianjun/桌面/农村人脸"
+save_path="/home/qianqianjun/桌面/马云人脸"
 os.makedirs(save_path,exist_ok=True)
 
 for image in images:
@@ -28,9 +28,8 @@ for image in images:
         if min(coordinate.bottom()-coordinate.top(),coordinate.right()-coordinate.left()) < 64:
             continue
         length=coordinate.right() -coordinate.left()
-        padding=length / 4
-        padding=min(padding,
-                    coordinate.top(),
+        #padding=length / 4
+        padding=min(coordinate.top(),
                     coordinate.left(),
                     img.shape[1]-coordinate.right(),
                     img.shape[0]-coordinate.bottom())

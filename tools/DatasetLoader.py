@@ -26,7 +26,7 @@ def load_AGFW()->list:
     for curdir, subdir, files in os.walk("/home/qianqianjun/下载/AGFW_cropped/cropped/128/male"):
         if len(files) < 500:
             continue
-        for i in range(500):
+        for i in range(200):
             all_paths.append(os.path.join(curdir, files[i]))
 
     return all_paths
@@ -50,17 +50,28 @@ def load_FGNET()->list:
     all_paths=[os.path.join(path,item) for item in paths]
     return all_paths
 
+def load_others()->list:
+    """
+    :return:
+    """
+    path="/home/qianqianjun/桌面/杨洋男"
+    paths=os.listdir(path)
+    all_paths=[os.path.join(path,item) for item in paths]
+    return all_paths
+
 def load_dataset(dataset_name:str,total_number:int,train_number:int):
     all_paths=[]
     if dataset_name=="JAFFE":
         all_paths=load_jaffe()
     if dataset_name=="AGFW":
-        #all_paths=load_AGFW()
-        all_paths=laod_Extend_AGFW()
+        all_paths=load_AGFW()
+        # all_paths=laod_Extend_AGFW()
     if dataset_name=="CelebA":
         all_paths=load_CelebA()
     if dataset_name=="FGNET":
         all_paths=load_FGNET()
+    if dataset_name=="other":
+        all_paths=load_others()
 
     assert total_number<len(all_paths),"没有足够的数据，请扩充数据集"
     assert total_number >= train_number ,"训练数据不能多于总数"

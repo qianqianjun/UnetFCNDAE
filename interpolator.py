@@ -5,8 +5,7 @@ write by qianqianjun
 2020.03.07
 深度特征插值过程
 """
-from model.experiment import *
-from tools.utils import getBaseGrid, saveIntermediateImage
+from tools.utils import *
 
 # 加载预训练的模型
 parm.useCuda=False

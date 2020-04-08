@@ -12,18 +12,34 @@ import os
 import pickle as pk
 import random
 
+import cv2
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torchvision.utils as Util
-from PIL import Image
 
+from model.UnetDAE import Encoders, Decoders
 from setting.parameter import Parameter
+from setting.parameter import parameter as parm
 
 
-def init_model(parm:Parameter,dataset_name:str,encoders:nn.Module,decoders:nn.Module,path_prefix:str):
-    model_path=os.path.join(path_prefix,dataset_name+"_"+parm.result_out)
+def init_model(parm:Parameter,dataset_name:str,path_prefix:str):
+    """
+    训练前初始化模型。
+    在Fine-tune 模式下，自动加载预训练模型进行微调训练
+    Fine-tune 为 False 或者没有预训练的模型，从头开始训练
+    :param parm:
+    :param dataset_name:  训练使用的数据集名称
+    :param path_prefix:  路径前缀，使用绝对路径
+    :return:
+    """
+    encoders=Encoders(parm)
+    decoders=Decoders(parm)
+    if parm.useCuda:
+        encoders=nn.Module.cuda(encoders)
+        decoders=nn.Module.cuda(decoders)
+    model_path=os.path.join(path_prefix,parm.result_out,dataset_name)
     if os.path.exists(model_path) and len(os.listdir(model_path)) >=1:
         path=os.path.join(model_path,os.listdir(model_path)[-1],parm.dirCheckpoints)
         nn.Module.load_state_dict(encoders,torch.load(
@@ -45,9 +61,7 @@ def init_model(parm:Parameter,dataset_name:str,encoders:nn.Module,decoders:nn.Mo
         nn.Module.apply(decoders,weight_init)
         start_epoch=0
         learning_rate=parm.learning_rate
-
-
-    return start_epoch,learning_rate
+    return start_epoch,learning_rate,encoders,decoders
 
 def init_train_env(parm,dataset_name:str,path_prefix):
     """
@@ -72,15 +86,11 @@ def init_train_env(parm,dataset_name:str,path_prefix):
         exit(0)
 
     # 创建实验用到的目录环境
-    os.makedirs(
-        os.path.join(path_prefix, dataset_name + "_" + parm.result_out, save_time_path, parm.dirCheckpoints),
-        exist_ok=True)
-    os.makedirs(
-        os.path.join(path_prefix, dataset_name + "_" + parm.result_out, save_time_path, parm.dirImageOutput),
-        exist_ok=True)
-    os.makedirs(os.path.join(path_prefix, dataset_name + "_" + parm.result_out, save_time_path, parm.dirTestOutput),
-                exist_ok=True)
-    return os.path.join(path_prefix,dataset_name+"_"+parm.result_out,save_time_path)
+    public=os.path.join(path_prefix,parm.result_out,dataset_name,save_time_path)
+    os.makedirs(os.path.join(public,parm.dirCheckpoints),exist_ok=True)
+    os.makedirs(os.path.join(public,parm.dirImageOutput),exist_ok=True)
+    os.makedirs(os.path.join(public, parm.dirTestOutput),exist_ok=True)
+    return public
 
 # 此处有 bug ！
 def weight_init(model):
@@ -160,85 +170,6 @@ def saveIntermediateImage(img_list:torch.Tensor, output_dir:str, n_sample:int=4,
         images=images[:,dim,:,:].unsqueeze(1)
 
     Util.save_image(images,"{}/{}.png".format(output_dir,filename),nrow=nrow,normalize=normalize,padding=padding)
-
-### 编码器，解码器模型工具类
-from setting.parameter import Parameter
-import torch.nn.functional as F
-################ 工具类  ####################################
-class Mixer(nn.Module):
-    def __init__(self,parm:Parameter,in_channel:int,out_channel:int):
-        """
-        建立一个全连接网络
-        :param parm:  超参数集合
-        :param in_channel:  输入通道数目
-        :param out_channel:  输出通道数目
-        """
-        super(Mixer, self).__init__()
-        self.net=nn.Sequential(
-            nn.Linear(in_channel,out_channel),
-            nn.Sigmoid()
-        )
-
-    def forward(self,x:torch.Tensor):
-        """
-        :param x:
-        :return:
-        """
-        out=self.net(x)
-        return out
-
-class Warper(nn.Module):
-    def __init__(self,parm:Parameter):
-        """
-        将纹理图像进行空间变形
-        :param parm:  超参数集合
-        """
-        super(Warper, self).__init__()
-        self.parm=parm
-        self.batchSize=parm.batchSize
-        self.imgSize=parm.imgSize
-
-    def forward(self,image_tensor:torch.Tensor,input_grid:torch.Tensor):
-        """
-        :param image_tensor: 输入图片的 tensor
-        :param input_grid:  变形场
-        :return:  经过变形场变换的最终图像
-        """
-        self.warp=input_grid.permute(0,2,3,1)
-        # 不清楚 align_corners 干什么用的， 但是不加上这个参数会有 warning
-        self.output=F.grid_sample(image_tensor,self.warp,align_corners=True)
-        # torch.nn.functional.grid_sample()
-
-        return self.output
-
-class GridSpatialIntegral(nn.Module):
-    def __init__(self,parm:Parameter):
-        """
-        变形场空间积分运算
-        :param parm: 超参数集合
-        """
-        super(GridSpatialIntegral, self).__init__()
-        self.parm=parm
-        self.w=parm.imgSize
-
-        self.filterx=torch.tensor(np.ones(shape=(1,1,1,self.w)),dtype=torch.float32,requires_grad=False)
-        self.filtery=torch.tensor(np.ones(shape=(1,1,self.w,1)),dtype=torch.float32,requires_grad=False)
-
-        if parm.useCuda:
-            self.filterx=self.filterx.cuda()
-            self.filtery=self.filtery.cuda()
-
-    def forward(self, input_diffgrid:torch.Tensor):
-        """
-        :param input_diffgrid: 差分变形场 tensor
-        :return:
-        """
-        x=F.conv_transpose2d(input=input_diffgrid[:,0,:,:].unsqueeze(1),weight=self.filterx,stride=1,padding=0)
-        y=F.conv_transpose2d(input=input_diffgrid[:,1,:,:].unsqueeze(1),weight=self.filtery,stride=1,padding=0)
-        output_grid=torch.cat((x[:,:,0:self.w,0:self.w],y[:,:,0:self.w,0:self.w]),1)
-
-        return output_grid
-
 class ImgSeleter:
     def __init__(self, attr_file_path, image_path):
         self.attr_file_path = attr_file_path
@@ -280,7 +211,7 @@ class ImgSeleter:
             assert amount <=len(image_absoult_paths)
             image_absoult_paths=image_absoult_paths[:amount]
         # 读取图片数据
-        imgs = np.array([np.array(Image.open(path)) for path in image_absoult_paths])
+        imgs = np.array([cv2.cvtColor(cv2.imread(path),cv2.COLOR_BGR2RGB) for path in image_absoult_paths])
         return imgs
 
     def getImagesWithoutAttribute(self, attribute: str, additions: list = None, amount: int = None,
@@ -313,7 +244,7 @@ class ImgSeleter:
             assert amount <= len(image_absoult_paths)
             image_absoult_paths = image_absoult_paths[:amount]
         # 读取图片数据
-        imgs = np.array([np.array(Image.open(path)) for path in image_absoult_paths])
+        imgs = np.array([cv2.cvtColor(cv2.imread(path),cv2.COLOR_BGR2RGB) for path in image_absoult_paths])
         return imgs
 
     def getImagePathsByAttributes(self,attributes:list,contain:bool=True,shuffle:bool=True):
@@ -363,3 +294,165 @@ class ImgSeleter:
             permutation = np.random.permutation(len(files_path))
             files_path = files_path[permutation]
         return files_path
+
+
+################  插值操作函数  #######################
+# 加载模型的函数
+def load_module(dataset_name:str,prefix_path):
+    paths = os.listdir(os.path.join(prefix_path,parm.result_out,dataset_name))
+    if len(paths) == 0:
+        exit("没有找到预训练的模型，请先训练网络")
+    model_dir = os.path.abspath(os.path.join(prefix_path,parm.result_out,dataset_name, paths[-1]))
+    print("加载模型地址：{}".format(model_dir))
+    encoders = Encoders(parm)
+    decoders = Decoders(parm)
+    if parm.useCuda:
+        torch.nn.Module.load_state_dict(encoders,torch.load(os.path.join(model_dir,parm.dirCheckpoints,"encoders.pth")))
+        torch.nn.Module.load_state_dict(decoders,torch.load(os.path.join(model_dir,parm.dirCheckpoints,"decoders.pth")))
+        encoders=encoders.cuda()
+        decoders=decoders.cuda()
+    else:
+        device = torch.device("cpu")
+        # 加载预训练的模型
+        torch.nn.Module.load_state_dict(encoders, torch.load(os.path.join(model_dir, parm.dirCheckpoints, "encoders.pth"),
+                                                       map_location=device))
+        torch.nn.Module.load_state_dict(decoders, torch.load(os.path.join(model_dir, parm.dirCheckpoints, "decoders.pth"),
+                                                       map_location=device))
+
+    return encoders,decoders,model_dir
+
+# 加载数据集相关的函数
+def test_AGFW(estimate_num:int=100,test_number:int=100,start_index:int=0,
+              estimate_select_from=0,gender:str="male",levels=None):
+    """
+    提取用于属性估计的图片数据集以及测试的数据集
+    :param estimate_num: 用于估计属性的图片集图片数量
+    :param test_number:  要进行插值测试的图片的数目
+    :param start_index:  测试图片开始索引
+    :param estimate_select_from: 估计属性的图片开始的索引
+    :param gender:  性别信息
+    :param levels:  两个年龄的级别 ，默认是 age_15_19 和 age_40_44
+    :return: 用户估计属性的两个数据集，以及需要测试的图像
+    """
+    dataset_path=os.path.join("/home/qianqianjun/下载/AGFW_cropped/cropped/128",gender)
+    if levels is None:
+        age1="age_15_19"
+        age2="age_40_44"
+    else:
+        age1=levels[0]
+        age2=levels[1]
+    neg_imgs=[]
+    pos_imgs=[]
+    test_imgs=[]
+
+    all_neg_images_path=os.listdir(os.path.join(dataset_path,age1))
+    all_pos_images_path=os.listdir(os.path.join(dataset_path,age2))
+    assert len(all_neg_images_path)>= estimate_select_from+estimate_num + start_index + test_number
+    assert len(all_pos_images_path)>= estimate_select_from+estimate_num
+
+    for name in all_neg_images_path[estimate_select_from:estimate_select_from+estimate_num]:
+        img = cv2.imread(os.path.join(dataset_path,age1, name))
+        img = cv2.resize(img, (parm.imgSize, parm.imgSize))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        neg_imgs.append(img)
+    for name in all_pos_images_path[estimate_select_from:estimate_select_from+estimate_num]:
+        img = cv2.imread(os.path.join(dataset_path,age2, name))
+        img = cv2.resize(img, (parm.imgSize, parm.imgSize))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        pos_imgs.append(img)
+
+    begin=estimate_select_from+estimate_num+start_index
+    for name in all_neg_images_path[begin:begin+test_number]:
+        img=cv2.imread(os.path.join(dataset_path,age1,name))
+        img=cv2.resize(img,(parm.imgSize,parm.imgSize))
+        img=cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+        test_imgs.append(img)
+
+    return neg_imgs,pos_imgs,test_imgs
+
+def test_JAFFE():
+    pos_imgs=[]
+    neg_imgs=[]
+    test_imgs=[]
+    images_path="/home/qianqianjun/下载/jaffe"
+    all_images_path=os.listdir("/home/qianqianjun/下载/jaffe")
+    for name in all_images_path:
+        if not name.endswith("tiff"):
+            continue
+        if name.find("HA")!=-1:
+            pos_imgs.append(
+                cv2.resize(
+                    cv2.imread(os.path.join(images_path,name)),
+                    (parm.imgSize,parm.imgSize)))
+        if name.find("NE") != -1:
+            neg_imgs.append(
+                cv2.resize(
+                    cv2.imread(os.path.join(images_path,name)),
+                    (parm.imgSize,parm.imgSize)))
+    for item in neg_imgs:
+        test_imgs.append(item)
+    return neg_imgs[:30],pos_imgs[:30],test_imgs
+
+def test_CelebA(target_attr:str,addition_attribute=None,test_num=100,
+                estimate_from_index=0,estimate_num=100,start_index=0):
+    if addition_attribute is None:
+        addition_attribute=[]
+    # target_attr="Mustache"
+    # target_attr="Eyeglasses"
+    # target_attr="Mouth_Slightly_Open"
+    # target_attr="Smiling"
+    # target_attr="Young"
+    neg_imgs = []
+    pos_imgs = []
+    test_imgs = []
+    dataset_image_path="/home/qianqianjun/CODE/DataSets/DaeDatasets"
+    seleter=ImgSeleter(parm.attr_path,dataset_image_path)
+    pos_imgs_paths=seleter.getImagePathsByCondition([target_attr],True,addition_attributes=["Male"])
+    neg_imgs_paths=seleter.getImagePathsByCondition([target_attr],False,addition_attributes=["Male"])
+
+    assert len(neg_imgs_paths)>=estimate_from_index+estimate_num+test_num+start_index
+    assert len(pos_imgs_paths)>=estimate_from_index+estimate_num
+    for name in pos_imgs_paths[estimate_from_index:estimate_from_index+estimate_num]:
+        pos_imgs.append(cv2.cvtColor(cv2.resize(
+                    cv2.imread(name),(parm.imgSize,parm.imgSize)),cv2.COLOR_BGR2RGB))
+    for name in neg_imgs_paths[estimate_from_index:estimate_from_index+estimate_num]:
+        neg_imgs.append(cv2.cvtColor(cv2.resize(
+            cv2.imread(name),(parm.imgSize,parm.imgSize)
+        ),cv2.COLOR_BGR2RGB))
+    begin=estimate_from_index+estimate_num
+    for name in neg_imgs_paths[begin:begin+start_index+test_num]:
+        test_imgs.append(cv2.cvtColor(cv2.resize(
+            cv2.imread(name),(parm.imgSize,parm.imgSize)
+        ),cv2.COLOR_BGR2RGB))
+
+    return neg_imgs,pos_imgs,test_imgs
+
+# 获取估计的属性向量的函数
+def getEstimateAttributeLantent(neg_imgs:list,pos_imgs:list,encoders):
+    neg_tensor = batchDataTransform(torch.tensor(neg_imgs, dtype=torch.float32), channel=3)
+    pos_tensor = batchDataTransform(torch.tensor(pos_imgs, dtype=torch.float32), channel=3)
+    # 获取要插值的数据
+    if parm.useCuda:
+        neg_tensor=neg_tensor.cuda()
+        pos_tensor=pos_tensor.cuda()
+    zpos, zIpos, zWpos, pos_texture_inter_outs,pos_warp_inter_outs = encoders(pos_tensor)
+    zneg, zIneg, zwneg, neg_texture_inter_outs,neg_warp_inter_outs = encoders(neg_tensor)
+
+    # 纹理属性向量的提取
+    zI_attribute = torch.mean(zIpos - zIneg, dim=0)
+    # 变形属性向量的提取
+    zW_attribute = torch.mean(zWpos - zwneg, dim=0)
+
+    texture_inter_outs_attribute = []
+    for pos_inter, neg_inter in zip(pos_texture_inter_outs, neg_texture_inter_outs):
+        texture_inter_outs_attribute.append(
+            torch.mean(pos_inter - neg_inter, dim=0)
+        )
+
+    warp_inter_outs_attribute = []
+    for pos_inter, neg_inter in zip(pos_warp_inter_outs, neg_warp_inter_outs):
+        warp_inter_outs_attribute.append(
+            torch.mean(pos_inter - neg_inter, dim=0)
+        )
+
+    return zI_attribute,zW_attribute,texture_inter_outs_attribute,warp_inter_outs_attribute

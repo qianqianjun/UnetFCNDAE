@@ -61,7 +61,4 @@ class DataSet(data.Dataset):
         :param resizeTo: 像图片转换到多大（边长）
         :return: 返回图片的 np.array() 数组表示
         """
-        img=cv2.imread(filepath)
-        img=cv2.resize(img,(resizeTo,resizeTo))
-        img=cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
-        return img
+        return cv2.cvtColor(cv2.resize(cv2.imread(filepath),(resizeTo,resizeTo)),cv2.COLOR_BGR2RGB)
